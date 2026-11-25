@@ -1,0 +1,3 @@
+PySide6
+certifi
+pyobjc-framework-Quartz; sys_platform == "darwin"
