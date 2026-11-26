@@ -15,4 +15,4 @@ DEBUG = False
 
 # 명예의 전당 서버 (Cloudflare Workers 주소)
 SERVER_URL = "https://grimmon-board.grimmon.workers.dev"   # 예: "https://grimmon-board.내서브도메인.workers.dev"
-SERVER_KEY = "hub"
+SERVER_KEY = "check"
