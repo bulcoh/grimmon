@@ -91,3 +91,6 @@ class Tracker:
         except Exception:
             pass   # 입력 감지 오류가 앱/드로잉을 방해하지 않도록
         return event
+import sys
+if sys.platform == "win32":
+    from .tracker_win import Tracker   # 윈도우에서는 이걸로 덮어쓰기

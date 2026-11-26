@@ -1,10 +1,10 @@
 import datetime, math, os, sys, random, threading, time, webbrowser
 from PySide6.QtCore import (Qt, QTimer, QRectF, QPointF, Signal, QObject, QPropertyAnimation,
                             QParallelAnimationGroup, QEasingCurve, QVariantAnimation, QPoint, QRect)
-from PySide6.QtGui import QPainter, QColor, QPen, QImage, QPixmap, QIcon, QFontDatabase, QFont
+from PySide6.QtGui import QPainter, QColor, QPen, QImage, QPixmap, QIcon, QFontDatabase, QFont, QShortcut, QKeySequence
 from PySide6.QtWidgets import (QWidget, QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
                                QMessageBox, QComboBox, QCheckBox, QLineEdit, QSystemTrayIcon, QScrollArea,
-                               QGraphicsOpacityEffect)
+                               QGraphicsOpacityEffect, QInputDialog)
 from . import config, board
 from .game import PALETTE, SIZE, EMPTY, fmt_distance
 from .devices import DEVICE_DB, SCREEN, OTHER
@@ -13,6 +13,7 @@ from .sfx import Sfx
 from .sprites import EGG_IDLE, SPRITE_GRAYS, SHAPES, BASE_COLOR, sprite_image
 
 W, H = 220, 320
+MOD = "Cmd" if sys.platform == "darwin" else "Ctrl"
 GH = 244        # 거리를 누르면 홈이 내려가는 높이 (그래프 영역)
 STYLE = """
 QWidget#page, QDialog { background:#1E1E1E; }
@@ -39,7 +40,7 @@ def load_theme(app):
     fam = QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else []
     if not fam: print("폰트 파일을 찾지 못했어요:", path)
     f = QFont(fam[0] if fam else app.font().family()); f.setPixelSize(16); f.setStyleStrategy(QFont.NoAntialias)
-    app.setFont(f)
+    app.setFont(f); app.setWindowIcon(egg_icon())
 
 def gray(i): v = PALETTE[i]; return QColor(v, v, v)
 def fg_for(i): return "#000" if PALETTE[i] >= 128 else "#fff"
@@ -62,8 +63,12 @@ def grid_image(grid):
         if v >= 0: img.setPixelColor(i % SIZE, i // SIZE, gray(v))
     return img
 
-def egg_icon():
-    return QIcon(QPixmap.fromImage(sprite_image(EGG_IDLE)).scaled(64, 64))
+def asset(name):
+    return os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "assets", name)
+
+def egg_icon():                                 # assets/icon.png 가 있으면 그것, 없으면 알 스프라이트
+    p = asset("icon.png")
+    return QIcon(p) if os.path.exists(p) else QIcon(QPixmap.fromImage(sprite_image(EGG_IDLE)).scaled(64, 64))
 
 class Bus(QObject):
     moved = Signal(float)
@@ -183,11 +188,14 @@ class ShapePicker(QWidget):                    # 부화 직후 단 한 번, 처�
             if r.contains(e.position()): self.hide(); self.picked.emit(n); return
 
 # ---------------- 부화 연출 (64x64 격자, 칸 5px) ----------------
-class HatchDialog(QDialog):
-    S = 5
+class HatchAnim(QWidget):                        # 메인 창 안에서 바로 재생 (화면의 글자는 모두 가려짐)
+    done = Signal()
+    S, OX, OY = 4, 46, 85                        # 아트 픽셀 4px, 메인 화면의 알 위치와 동일
     CRACK = [(16,6),(15,7),(15,8),(16,9),(17,10),(17,11),(16,12),(15,13),(15,14),(16,15),(17,16),(18,17),(18,18),(17,19),(16,20),(15,21),(15,22),(16,23),(17,24)]
-    def __init__(self, colors, parent=None):
-        super().__init__(parent); self.setFixedSize(320, 320); self.t = 0.0; self.img = sprite_image(EGG_IDLE)
+    def __init__(self, parent):
+        super().__init__(parent); page(self); self.hide(); self.img = sprite_image(EGG_IDLE); self.t = 0.0; self.pieces = []; self.parts = []
+        self.timer = QTimer(self); self.timer.timeout.connect(self.tick)
+    def start(self, colors):
         groups = {}
         for y, row in enumerate(EGG_IDLE):
             for x, ch in enumerate(row):
@@ -200,30 +208,26 @@ class HatchDialog(QDialog):
             ang, sp = math.atan2(cy - 16, cx - 16), random.uniform(16, 30)
             self.pieces.append((px, math.cos(ang) * sp, math.sin(ang) * sp - 10))
         self.parts = [(random.uniform(0, 6.2832), random.uniform(8, 34), random.uniform(6, 20), c) for c in colors]
-        self.timer = QTimer(self); self.timer.timeout.connect(self.tick); self.timer.start(16)
+        self.t = 0.0; self.setGeometry(0, 0, W, H); self.raise_(); self.show(); self.timer.start(16)
     def tick(self):
         self.t += 0.016; self.update()
-        if self.t > 7: self.accept()
-    def mousePressEvent(self, e):
-        if self.t > 3.2: self.accept()
+        if self.t > 4.2: self.timer.stop(); self.hide(); self.done.emit()
     def paintEvent(self, _):
-        p = QPainter(self); S, t = self.S, self.t; p.fillRect(self.rect(), QColor("#1E1E1E")); p.setPen(Qt.NoPen)
+        p = QPainter(self); S, t, ox, oy = self.S, self.t, self.OX, self.OY; p.setPen(Qt.NoPen)
         if t < 1.8:                                              # 흔들림 + 금
             jig = round(math.sin(t * 30) * min(1, t) * 1.5)
-            p.drawImage(QRectF((16 + jig) * S, 16 * S, 32 * S, 32 * S), self.img)
+            p.drawImage(QRectF(ox + jig * S, oy, 32 * S, 32 * S), self.img)
             n = int(max(0, (t - 0.4) / 1.2) * len(self.CRACK)); p.setBrush(QColor(30, 30, 30))
-            for x, y in self.CRACK[:n]: p.drawRect((16 + jig + x) * S, (16 + y) * S, S, S)
+            for x, y in self.CRACK[:n]: p.drawRect(ox + (jig + x) * S, oy + y * S, S, S)
             return
-        tt = t - 1.8                                             # 조각 + 픽셀 파티클
+        tt = t - 1.8                                             # 파편 + 픽셀 파티클
         for px, vx, vy in self.pieces:
             dx, dy = round(vx * tt), round(vy * tt + 25 * tt * tt)
-            for x, y, c in px:
-                v = SPRITE_GRAYS[c - 1]; p.setBrush(QColor(v, v, v)); p.drawRect((16 + x + dx) * S, (16 + y + dy) * S, S, S)
+            for x, y, c in px: v = SPRITE_GRAYS[c - 1]; p.setBrush(QColor(v, v, v)); p.drawRect(ox + (x + dx) * S, oy + (y + dy) * S, S, S)
         p.setPen(QPen(QColor("#777"), 1))
         for a, v, up, c in self.parts:
-            x = 32 + math.cos(a) * v * tt; y = 30 + math.sin(a) * v * tt - up * tt + 22 * tt * tt
-            p.setBrush(gray(c)); p.drawRect(int(x) * S, int(y) * S, 2 * S, 2 * S)
-        if t > 3.0: p.setPen(QColor("white")); p.drawText(QRectF(0, 12, 320, 30), Qt.AlignCenter, "픽셀을 받았어요!")
+            x = 16 + math.cos(a) * v * tt; y = 14 + math.sin(a) * v * tt - up * tt + 22 * tt * tt
+            p.setBrush(gray(c)); p.drawRect(ox + int(x) * S, oy + int(y) * S, 2 * S, 2 * S)
 
 # ---------------- 캐릭터 편집 (별도 창) ----------------
 class GridCanvas(QWidget):
@@ -235,6 +239,8 @@ class GridCanvas(QWidget):
             if v >= 0: p.fillRect((i % SIZE) * c, (i // SIZE) * c, c, c, gray(v))
         p.setPen(QPen(QColor(255, 255, 255, 20)))                                          # 그리드
         for k in range(SIZE + 1): p.drawLine(k * c, 0, k * c, SIZE * c); p.drawLine(0, k * c, SIZE * c, k * c)
+        f = p.font(); f.setPixelSize(14); p.setFont(f); p.setPen(QColor(255, 255, 255, 60))      # 정품 인증 안내문처럼 은은하게
+        p.drawText(QRectF(10, 8, 320, 60), Qt.AlignLeft | Qt.AlignTop, f"{MOD}+Z  실행취소\n{MOD}+Y  다시실행\n{MOD}+Backspace  전체 비우기")
     def _apply(self, e, erase):
         x, y = int(e.position().x()) // self.CELL, int(e.position().y()) // self.CELL
         if 0 <= x < SIZE and 0 <= y < SIZE and self.ed.set_cell(y * SIZE + x, erase): self.update()
@@ -257,20 +263,17 @@ class EditorDialog(QDialog):
             b = QPushButton("X" if i == 16 else ""); b.setFixedSize(30, 30)
             b.clicked.connect(self.pick_erase if i == 16 else (lambda _=False, i=i: self.pick(i))); pal.addWidget(b); self.btns.append(b)
         pal.addStretch(); top.addLayout(pal); top.addStretch(); root.addLayout(top)
-        g = QGridLayout(); g.setHorizontalSpacing(6); g.setVerticalSpacing(4)
-        self.name = QLineEdit(game.s["name"]); self.name.setPlaceholderText("이름을 입력해주세요"); self.name.setFixedHeight(64)
-        self.name.setMinimumWidth(240); self.name.setStyleSheet("font-size:26px;"); g.addWidget(self.name, 0, 0, 2, 1)
-        for text, fn, r, c in (("실행취소", self.do_undo, 0, 1), ("다시실행", self.do_redo, 0, 2), ("전체비우기", self.clear, 1, 1)):
-            b = QPushButton(text); b.setFixedHeight(30); b.clicked.connect(fn); g.addWidget(b, r, c)
-        ok = QPushButton("저장"); ok.setFixedSize(90, 30); ok.clicked.connect(self.save)
-        ok.setStyleSheet("background:#e6e6e6;color:#1E1E1E;border:none;")      # 강조색
-        no = QPushButton("취소"); no.setFixedSize(90, 30); no.clicked.connect(self.reject)
-        g.setColumnStretch(3, 1); g.addWidget(ok, 0, 4); g.addWidget(no, 1, 4); root.addLayout(g)
+        bot = QHBoxLayout(); bot.setSpacing(8)                                # [취소][저장] 2분할
+        no = QPushButton("취소"); no.setFixedHeight(30); no.clicked.connect(self.reject)
+        ok = QPushButton("저장"); ok.setFixedHeight(30); ok.clicked.connect(self.save); ok.setStyleSheet("background:#e6e6e6;color:#1E1E1E;border:none;")
+        bot.addWidget(no, 1); bot.addWidget(ok, 1); root.addLayout(bot)
+        for keys, fn in (("Ctrl+Z", self.do_undo), ("Ctrl+Y", self.do_redo), ("Ctrl+Backspace", self.clear)):   # 맥에서는 Cmd 로 동작
+            QShortcut(QKeySequence(keys), self).activated.connect(fn)
         self.refresh()
     def refresh(self):
         for i, b in enumerate(self.btns[:16]):
             sel = (i == self.color and not self.erase); b.setText(str(self.owned[i] - self.used[i]))
-            b.setStyleSheet(f"background:{gray(i).name()};color:{fg_for(i)};border:{3 if sel else 1}px solid {'#e33' if sel else '#444'};font-size:11px;padding:0;")
+            b.setStyleSheet(f"background:{gray(i).name()};color:{fg_for(i)};border:{3 if sel else 1}px solid {'#e33' if sel else '#444'};font-size:13px;padding:0;")
         self.btns[16].setStyleSheet(f"background:#2a2a2a;color:#ccc;border:{3 if self.erase else 1}px solid {'#e33' if self.erase else '#444'};padding:0;")
     def pick(self, i): self.color, self.erase = i, False; self.refresh()
     def pick_erase(self): self.erase = True; self.refresh()
@@ -299,7 +302,7 @@ class EditorDialog(QDialog):
     def do_redo(self):
         if self.redo: self.undo.append(list(self.grid)); self._restore(self.redo.pop())
     def clear(self): self.undo.append(list(self.grid)); self.redo.clear(); self._restore([EMPTY] * (SIZE * SIZE))
-    def save(self): self.game.set_character(self.grid, self.name.text()); self.game.save(); self.accept()
+    def save(self): self.game.set_character(self.grid, self.game.s["name"]); self.game.save(); self.accept()
 
 # ---------------- 페이지들 ----------------
 class HoverCell(QLabel):
@@ -322,7 +325,7 @@ class InventoryPage(QWidget):
         self.title = QLabel(d); self.title.setAlignment(Qt.AlignCenter); self.title.setGeometry(8, 94, 204, 40)
         self.sub = QLabel(d); self.sub.setAlignment(Qt.AlignCenter); self.sub.setGeometry(8, 134, 204, 18); self.sub.setStyleSheet("color:#888;font-size:12px;")
         self.story = QLabel(); self.story.setWordWrap(True); self.story.setAlignment(Qt.AlignTop | Qt.AlignLeft); self.story.setStyleSheet("color:#cfcfcf;font-size:14px;")
-        self.sa = QScrollArea(d); self.sa.setGeometry(8, 158, 204, 156); self.sa.setWidgetResizable(True); self.sa.setWidget(self.story)
+        self.sa = QScrollArea(d); self.sa.setGeometry(8, 158, 204, 156); self.sa.setWidgetResizable(True); self.sa.viewport().setStyleSheet("background:#1E1E1E;"); self.sa.setWidget(self.story)
         self.tm = QTimer(self); self.tm.timeout.connect(self.float_); self.anim = None
     def refresh(self):
         owned, placed = self.win.game.s["owned"], self.win.game.placed()
@@ -374,7 +377,8 @@ class SettingsPage(QWidget):
         for c in (self.maker, self.model):
             c.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon); c.setMinimumContentsLength(12); c.view().setMinimumWidth(300); lay.addWidget(c)
         self.maker.addItems(list(DEVICE_DB) + [OTHER]); self.maker.currentTextChanged.connect(self.fill)
-        t = QPushButton("입력 테스트"); t.clicked.connect(lambda: InputTestDialog(win).exec()); lay.addWidget(t)
+        r0 = QHBoxLayout(); t = QPushButton("입력 테스트"); t.clicked.connect(lambda: InputTestDialog(win).exec())
+        self.nb = QPushButton("이름 변경"); self.nb.clicked.connect(lambda: win.ask_name(self.g.s["name"])); r0.addWidget(t); r0.addWidget(self.nb); lay.addLayout(r0)
         self.top, self.tray = QCheckBox("항상 위"), QCheckBox("트레이 최소화"); lay.addWidget(self.top); lay.addWidget(self.tray)
         row = QHBoxLayout(); u = QPushButton("업데이트 확인"); u.clicked.connect(win.check_update_manual)
         q = QPushButton("종료"); q.clicked.connect(win.quit_app); row.addWidget(u); row.addWidget(q); lay.addLayout(row)
@@ -391,6 +395,7 @@ class SettingsPage(QWidget):
         if d.get("maker"): self.maker.setCurrentText(d["maker"])
         self.fill(self.maker.currentText())
         if d.get("model"): self.model.setCurrentText(d["model"])
+        self.nb.setEnabled(self.g.s["hatched"])
         self.top.setChecked(self.g.s["always_on_top"]); self.tray.setChecked(self.g.s["close_to_tray"])
     def reset_all(self):
         if QMessageBox.question(self, "리셋", "알부터 완전히 다시 시작할까요?\n(기기·프로그램 설정은 유지)") != QMessageBox.Yes: return
@@ -436,12 +441,12 @@ class LeaderboardPage(QWidget):
         for j, (k, txt) in enumerate((("all", "전체"), ("today", "오늘"))):
             tb = QPushButton(txt, self); tb.setGeometry(12 + j * 100, 40, 96, 26); tb.clicked.connect(lambda _=False, k=k: self.set_tab(k)); self.tabs[k] = tb
         self.msg = QLabel(self); self.msg.setGeometry(12, 68, 196, 30); self.msg.setWordWrap(True); self.msg.setStyleSheet("color:#888;font-size:12px;")
-        self.area = QScrollArea(self); self.area.setGeometry(6, 100, 208, 214); self.area.setWidgetResizable(True)
+        self.area = QScrollArea(self); self.area.setGeometry(6, 100, 208, 214); self.area.setWidgetResizable(True); self.area.viewport().setStyleSheet("background:#1E1E1E;")
         self.detail = RankDetail(self); self.res.connect(self.show_res); self._reset(); self._style()
     def _style(self):
         for k, tb in self.tabs.items(): tb.setStyleSheet("background:#e6e6e6;color:#1E1E1E;border:none;" if k == self.tab else "")
     def _reset(self):
-        self.inner = QWidget(); self.vl = QVBoxLayout(self.inner); self.vl.setContentsMargins(0, 0, 0, 0); self.vl.setSpacing(2); self.vl.setAlignment(Qt.AlignTop)
+        self.inner = QWidget(); page(self.inner); self.vl = QVBoxLayout(self.inner); self.vl.setContentsMargins(0, 0, 0, 0); self.vl.setSpacing(2); self.vl.setAlignment(Qt.AlignTop)
         self.area.setWidget(self.inner)
     def open(self): self.detail.hide(); self.tab = "all"; self._style(); self.load(True)      # 열 때 내 기록 업로드
     def set_tab(self, k): self.tab = k; self._style(); self.load(False)
@@ -528,8 +533,8 @@ class MainWindow(QWidget):
         self.inv, self.setp, self.lb = InventoryPage(self), SettingsPage(self), LeaderboardPage(self)
         self.graph = GraphPage(self)
         for p in (self.inv, self.setp, self.lb): p.setGeometry(W, 0, W, H); p.hide()
-        self.overlay = ClaimOverlay(self); self.overlay.done.connect(lambda: setattr(self, "busy", False)); self.overlay.absorbing.connect(lambda: self.sfx.play("absorb"))
-        self.picker = ShapePicker(self); self.picker.picked.connect(self.on_shape)
+        self.overlay = ClaimOverlay(self); self.overlay.done.connect(lambda: setattr(self, "busy", False)); self.overlay.absorbing.connect(lambda: self.sfx.play("tap_up"))
+        self.picker = ShapePicker(self); self.picker.picked.connect(self.on_shape); self.hatch_anim = HatchAnim(self); self.hatch_anim.done.connect(self.after_hatch)
         self.tray = QSystemTrayIcon(egg_icon(), self); tm = _menu(self)
         self.tray.setContextMenu(tm); self.tray.activated.connect(lambda r: self.show_main() if r == QSystemTrayIcon.Trigger else None); self.tray.show()
         self.poll = QTimer(self); self.poll.timeout.connect(self.refresh); self.poll.start(250)
@@ -598,9 +603,16 @@ class MainWindow(QWidget):
     # --- 동작 ---
     def hatch(self):
         self.busy = True; self.show_main(); colors = self.game.hatch(); self.game.save()
-        try: HatchDialog(colors, self).exec()               # 연출 오류가 나도 지급은 이미 끝남
-        except Exception as e: print("hatch anim:", e)
-        self.picker.start()                                   # 모양 선택이 끝날 때까지 busy 유지
+        try: self.hatch_anim.start(colors)                   # 이 창 안에서 바로 재생. 연출 오류가 나도 지급은 이미 끝남
+        except Exception as e: print("hatch anim:", e); self.after_hatch()
+    def after_hatch(self):                                    # 연출 끝 → 이름 짓기 → 모양 고르기 → 성형
+        self.ask_name(""); self.picker.start()
+    def ask_name(self, initial=""):
+        d = QInputDialog(self); d.setWindowTitle("그림몬"); d.setLabelText("이름을 입력해주세요"); d.setTextValue(initial)
+        d.setOkButtonText("확인"); d.setCancelButtonText("취소")
+        if d.exec():
+            n = d.textValue().strip()[:12]
+            if n: self.game.s["name"] = n; self.game.dirty = True; self.game.save(); self.refresh()
     def claim(self):
         if self.busy or self.menu_open or self.sliding or not self.game.s["gift_ready"]: return
         colors = self.game.claim_gift(); self.game.save(); self.busy = True; self.sfx.play("pop")

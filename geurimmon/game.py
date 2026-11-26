@@ -1,4 +1,4 @@
-import threading, random, datetime, uuid
+import collections, threading, random, datetime, time, uuid
 from . import config
 from .sprites import BASE_COLOR, SHAPE_PIXELS, SHAPES
 
@@ -23,9 +23,15 @@ class Game:
         self.s = defaults()
         self.s.update(store.load() or {})
         self.dirty = False
+        self._win, self._wsum = collections.deque(), 0.0      # 속도 상한용: 최근 1초간 인정된 거리
 
     # 입력 스레드에서 호출됨: 메모리 갱신만 한다 (디스크 저장 금지)
     def add_distance(self, cm):
+        now = time.monotonic(); win = self._win                # 어떤 1초 구간에서도 MAX_CM_PER_SEC(기본 140cm)까지만 인정
+        while win and now - win[0][0] > 1.0: self._wsum -= win.popleft()[1]
+        cm = min(cm, max(0.0, getattr(config, "MAX_CM_PER_SEC", 140.0) - self._wsum))
+        if cm <= 0: return
+        win.append((now, cm)); self._wsum += cm
         with self.lock:
             s = self.s
             s["total_cm"] += cm
