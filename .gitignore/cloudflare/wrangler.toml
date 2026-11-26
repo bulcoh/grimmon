@@ -1,0 +1,11 @@
+name = "grimmon-board"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
+
+[vars]
+KEY = "***"      # ← config.py 의 SERVER_KEY 와 똑같이
+
+[[d1_databases]]
+binding = "DB"
+database_name = "grimmon-db"
+database_id = "a760ca6b-deef-419f-982b-184d4b00f178"
